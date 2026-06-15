@@ -17,18 +17,23 @@ print(f"  公会长人数: {len(guild_leader_set)}")
 
 print("读取行为数据表（文件较大，请稍候）...")
 df = pd.read_excel('ua_behavior_merged_may_org.xlsx',
-                   sheet_name='ua_behavior_merged_may(1)')
+                   sheet_name='ua_behavior_merged_may')
 print(f"  行为数据行数: {len(df)}")
 
-# 公会主播集合：如有外部表则读取，否则用行为表中 org_id 不为空的 anchor_id 推导
+# 公会主播集合：如有外部表则读取，否则用行为表中 org_type 为普通公会/内容公会的 anchor_id 推导
+# 口径：anchor_id 对应的 org_type 属于「普通公会」或「内容公会」的才算公会主播
+GUILD_ORG_TYPES = {'普通公会', '内容公会'}
+
 if GUILD_ANCHOR_FILE:
     guild_anchors = pd.read_excel(GUILD_ANCHOR_FILE)
     guild_anchor_set = set(guild_anchors[GUILD_ANCHOR_COL])
     print(f"  公会主播人数（外部表）: {len(guild_anchor_set)}")
 else:
-    # 用行为表推导：打赏对象的 org_id 不为空 => 该 anchor 属于公会
-    guild_anchor_set = set(df[df['org_id'].notna()]['anchor_id'])
-    print(f"  公会主播人数（从行为表推导）: {len(guild_anchor_set)}")
+    # 用行为表推导：anchor_id 对应的 org_type 在「普通公会/内容公会」中 => 该 anchor 属于公会
+    guild_anchor_set = set(
+        df[df['org_type'].isin(GUILD_ORG_TYPES)]['anchor_id']
+    )
+    print(f"  公会主播人数（从行为表推导，org_type=普通公会/内容公会）: {len(guild_anchor_set)}")
 
 # ============================================================
 # Step 2: 按 user_id 聚合计算分类所需指标
@@ -36,36 +41,47 @@ else:
 print("\n计算用户级指标...")
 
 # 2-1 总打赏金额
-user_total = df.groupby('user_id')['gift_total_diamond_x5'].sum().rename('total_diamond')
+user_total = df.groupby('user_id')['total_diamond_fee'].sum().rename('total_diamond')
 
 # 2-2 Top1 主播打赏占比
-anchor_diamond = df.groupby(['user_id', 'anchor_id'])['gift_total_diamond_x5'].sum().reset_index()
-top1 = anchor_diamond.sort_values('gift_total_diamond_x5', ascending=False) \
+anchor_diamond = df.groupby(['user_id', 'anchor_id'])['total_diamond_fee'].sum().reset_index()
+top1 = anchor_diamond.sort_values('total_diamond_fee', ascending=False) \
                       .groupby('user_id').first().reset_index()
-top1 = top1.rename(columns={'gift_total_diamond_x5': 'top1_anchor_diamond',
+top1 = top1.rename(columns={'total_diamond_fee': 'top1_anchor_diamond',
                              'anchor_id': 'top1_anchor_id'})
 
-# 2-3 单一公会打赏占比（org_id 不为空的部分）
-df_org = df[df['org_id'].notna()].copy()
-org_diamond = df_org.groupby(['user_id', 'org_id'])['gift_total_diamond_x5'].sum().reset_index()
-top1_org = org_diamond.sort_values('gift_total_diamond_x5', ascending=False) \
+# 2-3 单一公会打赏占比（仅统计 org_type 为普通公会/内容公会的打赏）
+df_org = df[df['org_type'].isin(GUILD_ORG_TYPES)].copy()
+org_diamond = df_org.groupby(['user_id', 'org_id'])['total_diamond_fee'].sum().reset_index()
+top1_org = org_diamond.sort_values('total_diamond_fee', ascending=False) \
                        .groupby('user_id').first().reset_index()
-top1_org = top1_org.rename(columns={'gift_total_diamond_x5': 'top1_org_diamond',
+top1_org = top1_org.rename(columns={'total_diamond_fee': 'top1_org_diamond',
                                     'org_id': 'top1_org_id'})
 
 # 2-4 Top3 主播打赏合计 & 是否属于同一公会
 # 取每个 user 打赏前3的 anchor
-top3 = anchor_diamond.sort_values('gift_total_diamond_x5', ascending=False) \
+top3 = anchor_diamond.sort_values('total_diamond_fee', ascending=False) \
                       .groupby('user_id').head(3).reset_index(drop=True)
 
-# 给 top3 主播关联 org_id（取主播对应的公会，用众数）
-anchor_org_map = df[df['org_id'].notna()].groupby('anchor_id')['org_id'].first()
+# 给 top3 主播关联 org_id（仅取 org_type 为普通公会/内容公会的记录，取 first）
+anchor_org_map = df[df['org_type'].isin(GUILD_ORG_TYPES)].groupby('anchor_id')['org_id'].first()
 top3['org_id'] = top3['anchor_id'].map(anchor_org_map)
 
+# 判断 Top3 是否跨公会：
+# 只有当 Top3 主播「全部属于同一个公会（org_id 相同且非空）」才算不跨公会
+# 只要有任意一个主播公会为空（独立主播）或属于不同公会，均视为跨公会
+def is_cross_org(org_series):
+    valid = org_series.dropna()
+    if len(valid) == len(org_series) and valid.nunique() == 1:
+        return False   # 全部属于同一公会，不跨
+    return True        # 有空值或有多个不同公会，算跨
+
 top3_stats = top3.groupby('user_id').agg(
-    top3_diamond=('gift_total_diamond_x5', 'sum'),
-    top3_anchor_org_nunique=('org_id', 'nunique')   # Top3主播属于几个不同公会 nunique去重计数
+    top3_diamond=('total_diamond_fee', 'sum'),
 ).reset_index()
+top3_cross = top3.groupby('user_id')['org_id'].apply(is_cross_org).reset_index()
+top3_cross.columns = ['user_id', 'top3_cross_org']
+top3_stats = top3_stats.merge(top3_cross, on='user_id', how='left')
 
 # ============================================================
 # Step 3: 合并所有指标
@@ -83,11 +99,8 @@ user_df['top3_ratio']        = user_df['top3_diamond']        / user_df['total_d
 # 是否是公会长
 user_df['is_guild_leader'] = user_df['user_id'].isin(guild_leader_set)
 
-# 是否本身是公会主播（user_id 出现在 anchor_id 中）
+# 是否公会主播：user_id 出现在 anchor_id 中，且该 anchor_id 对应 org_type 为普通公会/内容公会
 user_df['is_guild_anchor'] = user_df['user_id'].isin(guild_anchor_set)
-
-# Top3 主播是否跨公会（属于 ≥2 个不同公会）
-user_df['top3_cross_org'] = user_df['top3_anchor_org_nunique'] >= 2
 
 print(f"  用户总数: {len(user_df)}")
 
@@ -127,7 +140,7 @@ def classify(row):
     if orgr >= 0.8 and td < 10000:
         return '公会粉丝'
 
-    # 6. 公会主播：不属于以上类别；自身为公会主播
+    # 6. 公会主播：不属于以上类别；自身 anchor_id 对应的 org_type 为普通公会/内容公会
     if row['is_guild_anchor']:
         return '公会主播'
 
@@ -144,7 +157,10 @@ def classify(row):
         return '中价值其他用户'
 
     # 10. 低价值其他用户：总打赏<1000
-    return '低价值其他用户'
+    if td < 1000:
+        return '低价值其他用户'
+    
+    return '其他大R'
 
 user_df['user_category'] = user_df.apply(classify, axis=1)
 
