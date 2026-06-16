@@ -2,10 +2,10 @@ import pandas as pd
 import numpy as np
 
 # ============================================================
-# 配置区：如有公会主播列表，填入文件名和列名
+# 配置区：公会主播列表（主播-公会.xlsx）
 # ============================================================
-GUILD_ANCHOR_FILE = None       # 例如 '公会主播id.xlsx'，没有则填 None
-GUILD_ANCHOR_COL  = 'anchor_id'  # 公会主播表中的 anchor_id 列名
+GUILD_ANCHOR_FILE = '主播-公会.xlsx'   # 主播-公会映射表
+GUILD_ANCHOR_COL  = 'author_id'        # 主播-公会表中的主播 id 列名
 
 # ============================================================
 # Step 1: 读取数据
@@ -20,20 +20,14 @@ df = pd.read_excel('ua_behavior_merged_may_org.xlsx',
                    sheet_name='ua_behavior_merged_may')
 print(f"  行为数据行数: {len(df)}")
 
-# 公会主播集合：如有外部表则读取，否则用行为表中 org_type 为普通公会/内容公会的 anchor_id 推导
-# 口径：anchor_id 对应的 org_type 属于「普通公会」或「内容公会」的才算公会主播
+# org_type 过滤集合（用于公会赞助商/粉丝等指标计算）
 GUILD_ORG_TYPES = {'普通公会', '内容公会'}
 
-if GUILD_ANCHOR_FILE:
-    guild_anchors = pd.read_excel(GUILD_ANCHOR_FILE)
-    guild_anchor_set = set(guild_anchors[GUILD_ANCHOR_COL])
-    print(f"  公会主播人数（外部表）: {len(guild_anchor_set)}")
-else:
-    # 用行为表推导：anchor_id 对应的 org_type 在「普通公会/内容公会」中 => 该 anchor 属于公会
-    guild_anchor_set = set(
-        df[df['org_type'].isin(GUILD_ORG_TYPES)]['anchor_id']
-    )
-    print(f"  公会主播人数（从行为表推导，org_type=普通公会/内容公会）: {len(guild_anchor_set)}")
+# 公会主播集合：直接从「主播-公会.xlsx」读取，避免因行为数据不全而漏判
+print("读取主播-公会映射表...")
+guild_anchor_df = pd.read_excel(GUILD_ANCHOR_FILE)
+guild_anchor_set = set(guild_anchor_df[GUILD_ANCHOR_COL])
+print(f"  公会主播人数（主播-公会.xlsx）: {len(guild_anchor_set)}")
 
 # ============================================================
 # Step 2: 按 user_id 聚合计算分类所需指标
@@ -99,7 +93,8 @@ user_df['top3_ratio']        = user_df['top3_diamond']        / user_df['total_d
 # 是否是公会长
 user_df['is_guild_leader'] = user_df['user_id'].isin(guild_leader_set)
 
-# 是否公会主播：user_id 出现在 anchor_id 中，且该 anchor_id 对应 org_type 为普通公会/内容公会
+# 是否公会主播：user_id 出现在「主播-公会.xlsx」的 author_id 中
+# 使用专门的主播-公会映射表，避免因行为数据不全（用户未对某些主播打赏）而漏判
 user_df['is_guild_anchor'] = user_df['user_id'].isin(guild_anchor_set)
 
 print(f"  用户总数: {len(user_df)}")
